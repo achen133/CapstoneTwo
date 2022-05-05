@@ -130,4 +130,4 @@ dmypy.json
 
 # Account details
 account_details.txt
-auth_params.py
+config.py
