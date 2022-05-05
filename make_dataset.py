@@ -1,4 +1,5 @@
-import pandas as pd
-print('hello world k1')
+import MetaTrader5 as mt5
+from datetime import datetime
 
+mt5_account = int()
 
