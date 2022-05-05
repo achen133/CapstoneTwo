@@ -131,3 +131,4 @@ dmypy.json
 # Account details
 account_details.txt
 config.py
+td_state.json
