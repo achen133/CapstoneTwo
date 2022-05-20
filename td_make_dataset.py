@@ -13,6 +13,9 @@ td_client = TDClient(client_id = API_KEY, redirect_uri = CALLBACK_URL, account_n
 td_client.login()
 
 #establish parameters to pull stock data in a specified range from start date to present
+def datetime_to_ms(date):
+    return str(int(round(date.timestamp() * 1000)))
+
 # datetime(year, month, day, hour, minute, second, microsecond)
 howfarback = 365
 # present_date = datetime.now()
@@ -60,6 +63,23 @@ def generate_returns(buy_lst, sell_lst, signal_lst, n_shares):
     profit = round(sum(trade_price), 2)
     
     return trade_index, trade_price, profit
+
+#function takes an indicator profit summary & profit col name and outputs a subset of df's max value(s)
+def get_top_profits(profit_summary, profit_col):
+    _profits = []
+    if profit_summary[profit_col].max() > 0:
+        top_profits = profit_summary[profit_summary[profit_col] == profit_summary[profit_col].max()]
+        _profits.append(top_profits)
+    elif profit_summary[profit_col].max() == 0:
+        print('[ERROR] Zero Profit')
+        top_profits = pd.DataFrame(index=profit_summary.index, columns=profit_summary.keys())
+        _profits.append(top_profits)
+    elif profit_summary[profit_col].max() < 0:
+        print('[ERROR] Negative Profit: ' + str(profit_summary[profit_col].max()))
+        top_profits = pd.DataFrame(index=profit_summary.index, columns=profit_summary.keys())
+        _profits.append(top_profits)
+    df_profits = pd.concat(_profits, ignore_index=True)
+    return df_profits
     
 #function for Simple Moving Average (SMA)
 def SMA(data, period, col = 'close'):
@@ -92,8 +112,41 @@ MA_all_pairs = SMA_pairs + hybridMA_pairs + EMA_pairs
 def MA_identify(pair):
     return MA_all_pairs.index(pair)
 
+def MA_strategy2(price, MA_pair1, MA_pair2):
+    
+    signal_ma, buy, sell= ([] for lst in range(3))
+    signal = 0
+    
+    for i in range(len(price)):
+        if MA_pair1[i] >= MA_pair2[i]:
+            if signal != 1:
+                buy.append(price[i])
+                sell.append(0)
+                signal = 1
+                signal_ma.append(signal)
+            else:
+                buy.append(0)
+                sell.append(0)
+                signal_ma.append(0)
+        elif MA_pair1[i] <= MA_pair2[i]:
+            if signal != -1:
+                buy.append(0)
+                sell.append(price[i])
+                signal = -1
+                signal_ma.append(signal)
+            else:
+                buy.append(0)
+                sell.append(0)
+                signal_ma.append(0)
+        else:
+            buy.append(0)
+            sell.append(0)
+            signal_ma.append(0)
+    
+    return buy, sell, signal_ma
+
 #function to return an ordered list in a dict of the most profitable MA strategy given the input: MA_pair
-def MA_buysell_indicators(MA_pair, data):    #change name to MA_strategy
+def MA_strategy(MA_pair, data):
     
     #transforming the str of MA pairs to identify which period and which MA calculation to use
     pair = MA_pair.split('__')
@@ -115,7 +168,7 @@ def MA_buysell_indicators(MA_pair, data):    #change name to MA_strategy
         MA_func = 'EMA'
         
     #iterating through all combinations
-    p1_list, p2_list, r_profits, buysell_prices, buysell_dates = ([] for lst in range(5))
+    p1_list, p2_list, r_profits, MA_trade_index, buysell_prices, buysell_dates = ([] for lst in range(6))
     for p1 in MA1:
         for p2 in MA2:
             df = data.copy()
@@ -152,6 +205,7 @@ def MA_buysell_indicators(MA_pair, data):    #change name to MA_strategy
                     trade_price.append(round(trade[1]*n_shares, 2))
             returns = sum(trade_price)
             buysell_prices.append(trade_price)
+            MA_trade_index.append(trade_index)
             
             #convert date format and store the days of the buy/sell points
             bs_date = []
@@ -171,10 +225,62 @@ def MA_buysell_indicators(MA_pair, data):    #change name to MA_strategy
                                'MA_id': MA_identify(MA_pair),
                                'p_MA1': p1_list,
                                'p_MA2': p2_list,
+                               'trade_index': MA_trade_index,
                                'buy/sell': buysell_prices,
                                'profit': r_profits}).sort_values(by = 'profit', ascending=False)
 
     return MA_pair_df
+    
+def MA_parameters(MA_pair, data):
+    
+    #transforming the str of MA pairs to identify which period and which MA calculation to use
+    pair = MA_pair.split('__')
+    if pair[0][0] == 's':
+        MA1 = SMA_short
+    elif pair[0][0] == 'm':
+        MA1 = SMA_mid
+    if pair[1][0] == 's':
+        MA2 = SMA_short
+    elif pair[1][0] == 'm':
+        MA2 = SMA_mid
+    if pair[0][1] == 'S':
+        MA_func = 'SMA'
+    elif pair[0][1] == 'E':
+        MA_func = 'EMA'
+    if pair[1][1] == 'S':
+        MA_func = 'SMA'
+    elif pair[1][1] == 'E':
+        MA_func = 'EMA'
+        
+    #iterating through all combinations
+    p1_list, p2_list, trade_index, trade_price, profits = ([] for lst in range(5))
+    for p1 in MA1:
+        for p2 in MA2:
+            df = data.copy()
+            name_MA1 = pair[0] + str(p1)
+            name_MA2 = pair[1] + str(p2)
+            df[name_MA1] = hybrid_MA(MA_func, df, p1)
+            df[name_MA2] = hybrid_MA(MA_func, df, p2)
+            
+            MA_buy_prices, MA_sell_prices, signal_ma = MA_strategy2(df['close'], df[name_MA1], df[name_MA2])
+            MA_trade_index, MA_trade_price, MA_profit = generate_returns(MA_buy_prices, MA_sell_prices, signal_ma, 1)
+
+            p1_list.append(p1)
+            p2_list.append(p2)
+            trade_index.append(MA_trade_index)
+            trade_price.append(MA_trade_price)
+            profits.append(MA_profit)
+
+    MA_profits_summary = pd.DataFrame({'MA_id': MA_identify(MA_pair),
+                                       'p_MA1': p1_list,
+                                       'p_MA2': p2_list,
+                                       'MA_trade_index': trade_index,
+                                       'MA_trade_price': trade_price,
+                                       'MA_profits': profits}).sort_values(by='MA_profits', ascending=False).reset_index()
+    
+    MA_winners = get_top_profits(MA_profits_summary, 'MA_profits')
+    print(type(MA_winners))
+    return MA_winners
 
 def MA_profit_stats(dataframe):
     profit_details = pd.DataFrame({'MA_id':dataframe['MA_id'].values,
@@ -186,22 +292,21 @@ def MA_profit_stats(dataframe):
     
     return profit_details
 
-def run_MA_func():
-    df = df_daily.copy()
-    n_samples = 50
+def run_MA_func(stock_data, n_samples):
+    df = stock_data.copy()
     
-    sSMA__sSMA = MA_buysell_indicators(SMA_pairs[0], df).head(n_samples)
-    sSMA__mSMA = MA_buysell_indicators(SMA_pairs[1], df).head(n_samples)
-    mSMA__mSMA = MA_buysell_indicators(SMA_pairs[2], df).head(n_samples)
+    sSMA__sSMA = MA_strategy(SMA_pairs[0], df).head(n_samples)
+    sSMA__mSMA = MA_strategy(SMA_pairs[1], df).head(n_samples)
+    mSMA__mSMA = MA_strategy(SMA_pairs[2], df).head(n_samples)
     
-    sEMA__sSMA = MA_buysell_indicators(hybridMA_pairs[0], df).head(n_samples)
-    sSMA__mEMA = MA_buysell_indicators(hybridMA_pairs[1], df).head(n_samples)
-    sEMA__mSMA = MA_buysell_indicators(hybridMA_pairs[2], df).head(n_samples)
-    mEMA__mSMA = MA_buysell_indicators(hybridMA_pairs[3], df).head(n_samples)
+    sEMA__sSMA = MA_strategy(hybridMA_pairs[0], df).head(n_samples)
+    sSMA__mEMA = MA_strategy(hybridMA_pairs[1], df).head(n_samples)
+    sEMA__mSMA = MA_strategy(hybridMA_pairs[2], df).head(n_samples)
+    mEMA__mSMA = MA_strategy(hybridMA_pairs[3], df).head(n_samples)
     
-    sEMA__sEMA = MA_buysell_indicators(EMA_pairs[0], df).head(n_samples)
-    sEMA__mEMA = MA_buysell_indicators(EMA_pairs[1], df).head(n_samples)
-    mEMA__mEMA = MA_buysell_indicators(EMA_pairs[2], df).head(n_samples)
+    sEMA__sEMA = MA_strategy(EMA_pairs[0], df).head(n_samples)
+    sEMA__mEMA = MA_strategy(EMA_pairs[1], df).head(n_samples)
+    mEMA__mEMA = MA_strategy(EMA_pairs[2], df).head(n_samples)
     
     moving_average_pairs = [sSMA__sSMA, sSMA__mSMA, mSMA__mSMA, sEMA__sSMA, sSMA__mEMA,
                             sEMA__mSMA, mEMA__mSMA, sEMA__sEMA, sEMA__mEMA, mEMA__mEMA]
@@ -213,10 +318,58 @@ def run_MA_func():
             dd[k].append(v)
             
     MA_Profit_Summary = pd.DataFrame(dd).sort_values(by = 'highest_profit', axis=0, ascending=False).reset_index()
-    MA_winner = moving_average_pairs[int(MA_Profit_Summary['MA_id'][0])].iloc[0, :]
+    
+    MA_winner_index = MA_Profit_Summary[MA_Profit_Summary['highest_profit'] == MA_Profit_Summary['highest_profit'].max()].index
+    MA_winners = defaultdict(list)
+    for i in MA_winner_index:
+        MA_winner = moving_average_pairs[int(MA_Profit_Summary['MA_id'][i])].iloc[int(MA_Profit_Summary['index'][i]), :]
+        for k, v in MA_winner.items():
+            MA_winners[k].append(v)
+    MA_winners = pd.DataFrame(MA_winners)
+    
+    return MA_Profit_Summary.head(10), MA_winners.T
+
+def run_MA_func2(stock_data):
+    df = stock_data.copy()
+    
+    sSMA__sSMA = MA_parameters(SMA_pairs[0], df)
+    sSMA__mSMA = MA_parameters(SMA_pairs[1], df)
+    mSMA__mSMA = MA_parameters(SMA_pairs[2], df)
+    
+    sEMA__sSMA = MA_parameters(hybridMA_pairs[0], df)
+    sSMA__mEMA = MA_parameters(hybridMA_pairs[1], df)
+    sEMA__mSMA = MA_parameters(hybridMA_pairs[2], df)
+    mEMA__mSMA = MA_parameters(hybridMA_pairs[3], df)
+    
+    sEMA__sEMA = MA_parameters(EMA_pairs[0], df)
+    sEMA__mEMA = MA_parameters(EMA_pairs[1], df)
+    mEMA__mEMA = MA_parameters(EMA_pairs[2], df)
+    
+    moving_average_pairs = [sSMA__sSMA, sSMA__mSMA, mSMA__mSMA, sEMA__sSMA, sSMA__mEMA,
+                            sEMA__mSMA, mEMA__mSMA, sEMA__sEMA, sEMA__mEMA, mEMA__mEMA]
         
-    return MA_winner.T
-# print(run_MA_func())
+    cmoving_average_pairs = pd.concat(moving_average_pairs, ignore_index=True).dropna()
+    cmoving_average_pairs = cmoving_average_pairs.sort_values(by = 'MA_profits', axis=0, ascending=False).reset_index()
+    print(cmoving_average_pairs)
+    # dd = defaultdict(list)
+    # for MApair in moving_average_pairs:
+    #     print(MApair)
+    #     for k, v in MApair.items():
+    #         dd[k].append(v)
+            
+    # MA_Profit_Summary = pd.DataFrame(dd).sort_values(by = 'MA_profits', axis=0, ascending=False).reset_index()
+    
+    MA_winner_index = get_top_profits(cmoving_average_pairs, 'MA_profits')
+    
+    # MA_winner_index = MA_Profit_Summary[MA_Profit_Summary['MA_profits'] == MA_Profit_Summary['MA_profits'].max()].index
+    # MA_winners = defaultdict(list)
+    # for i in MA_winner_index:
+    #     MA_winner = moving_average_pairs[int(MA_Profit_Summary['MA_id'][i])].iloc[int(MA_Profit_Summary['index'][i]), :]
+    #     for k, v in MA_winner.items():
+    #         MA_winners[k].append(v)
+    # MA_winners = pd.DataFrame(MA_winners)
+    return MA_winner_index
+    # return MA_Profit_Summary.head(10), MA_winners
 
 def MACD_strategy(price, MACD, signal_line):
     signal_macd, buy, sell= ([] for lst in range(3))
@@ -273,9 +426,9 @@ def MACD_parameters(data):
     MACD_profits_summary = pd.concat([MACD_profits_summary, MACD_profit_entry])
     MACD_profits_summary = MACD_profits_summary.sort_values(by = 'MACD_profits', axis=0, ascending=False)
               
-    return MACD_profits_summary
+    return MACD_trade_index, MACD_trade_price, MACD_profit
 
-print(MACD_parameters(df_daily))
+# print(MACD_parameters(df_daily))
 print('------------------------------------------------')
 
 #squeeze indicators: Bollinger Bands, Keltner Channels, ATR, TTM Squeeze
@@ -391,30 +544,33 @@ def ttm_squeeze_strategy(price, in_squeeze, DC_mean):
     signal = 0
     
     for i in range(len(price)):
-        if in_squeeze[i] != 1 and in_squeeze[i-1] == 1 and DC_mean[i] > 0:
-            if signal != 1:
-                buy.append(price[i])
-                sell.append(0)
-                signal = 1
-                signal_ttm.append(signal)
+        try:
+            if in_squeeze[i] != 1 and in_squeeze[i-1] == 1 and DC_mean[i] > 0:
+                if signal != 1:
+                    buy.append(price[i])
+                    sell.append(0)
+                    signal = 1
+                    signal_ttm.append(signal)
+                else:
+                    buy.append(0)
+                    sell.append(0)
+                    signal_ttm.append(0)
+            if in_squeeze[i] != 1 and in_squeeze[i-1] == 1 and DC_mean[i] < 0:
+                if signal != -1:
+                    buy.append(0)
+                    sell.append(price[i])
+                    signal = -1
+                    signal_ttm.append(signal)
+                else:
+                    buy.append(0)
+                    sell.append(0)
+                    signal_ttm.append(0)
             else:
                 buy.append(0)
                 sell.append(0)
                 signal_ttm.append(0)
-        if in_squeeze[i] != 1 and in_squeeze[i-1] == 1 and DC_mean[i] < 0:
-            if signal != -1:
-                buy.append(0)
-                sell.append(price[i])
-                signal = -1
-                signal_ttm.append(signal)
-            else:
-                buy.append(0)
-                sell.append(0)
-                signal_ttm.append(0)
-        else:
-            buy.append(0)
-            sell.append(0)
-            signal_ttm.append(0)
+        except KeyError:
+            pass
     
     return buy, sell, signal_ttm
 
@@ -443,7 +599,9 @@ def BB_parameters(data):
                                        'BB_trade_price': trade_price,
                                        'BB_profits': profits}).sort_values(by='BB_profits', ascending=False).reset_index()
     
-    return BB_profits_summary
+    BB_winners = get_top_profits(BB_profits_summary, 'BB_profits')
+    
+    return BB_winners
 
 def KC_parameters(data):
     period, multiplier, trade_index, trade_price, profits = ([] for lst in range(5))
@@ -473,7 +631,9 @@ def KC_parameters(data):
                                        'KC_trade_price': trade_price,
                                        'KC_profits': profits}).sort_values(by='KC_profits', ascending=False).reset_index()
     
-    return KC_profits_summary
+    KC_winners = get_top_profits(KC_profits_summary, 'KC_profits')
+    
+    return KC_winners
 
 def squeeze_parameters(data):
     period, BB_multiplier, KC_multiplier, trade_index, trade_price, profits = ([] for lst in range(6))
@@ -511,7 +671,9 @@ def squeeze_parameters(data):
                                             'squeeze_trade_price': trade_price,
                                             'squeeze_profits': profits}).sort_values(by='squeeze_profits', ascending=False).reset_index()
     
-    return squeeze_profits_summary
+    squeeze_winners = get_top_profits(squeeze_profits_summary, 'squeeze_profits')
+    
+    return squeeze_winners
 
 def ttm_squeeze_parameters(data):
     period, BB_multiplier, KC_multiplier, trade_index, trade_price, profits = ([] for lst in range(6))
@@ -550,14 +712,16 @@ def ttm_squeeze_parameters(data):
                 trade_price.append(ttm_trade_price)
                 profits.append(ttm_profit)
                 
-    ttm_squeeze_profits_summary = pd.DataFrame({'squeeze_period': period,
-                                            'std_dev_multiplier': BB_multiplier, 
-                                            'ATR_multiplier': KC_multiplier,
-                                            'ttm_trade_index': trade_index,
-                                            'ttm_trade_price': trade_price,
-                                            'ttm_profits': profits}).sort_values(by='ttm_profits', ascending=False).reset_index()
+    ttm_profits_summary = pd.DataFrame({'squeeze_period': period,
+                                        'std_dev_multiplier': BB_multiplier, 
+                                        'ATR_multiplier': KC_multiplier,
+                                        'ttm_trade_index': trade_index,
+                                        'ttm_trade_price': trade_price,
+                                        'ttm_profits': profits}).sort_values(by='ttm_profits', ascending=False).reset_index()
     
-    return ttm_squeeze_profits_summary
+    ttm_winners = get_top_profits(ttm_profits_summary, 'ttm_profits')
+    
+    return ttm_winners
 
 def run_squeeze_func():
     n_samples = 10
@@ -580,7 +744,7 @@ def run_squeeze_func():
     ttm_squeeze_mean = ttm_squeeze_stats.iloc[:, -1:].mean()
     ttm_squeeze_std = ttm_squeeze_stats.iloc[:, -1:].std(ddof=0)
     print(ttm_squeeze_stats.iloc[0, :], ttm_squeeze_mean, ttm_squeeze_std)
-
+# run_squeeze_func()
 print('------------------------------------------------')
 
 #ROC to KST momentum indicators
@@ -710,8 +874,9 @@ def KST_parameters(data, sma1, sma2, sma3, sma4, kst_sma=9):
                     KST_profit_entry = pd.DataFrame(dd)
                     KST_profits_summary = pd.concat([KST_profits_summary, KST_profit_entry])
     KST_profits_summary = KST_profits_summary.sort_values(by = 'KST_profits', axis=0, ascending=False)
+    KST_winner = KST_profits_summary.iloc[0, :]
               
-    return KST_profits_summary
+    return KST_winner
 # print(KST_parameters(df_momentum, 10, 10, 10, 15))
 
 def run_KST_func():
@@ -739,8 +904,39 @@ def run_KST_func():
     KST_profits_all = KST_profits_all.sort_values(by = 'KST_profits', axis=0, ascending=False)
                 
     return KST_profits_all
-
+# print(run_KST_func())
 print('--------------------------------------------------')
+
+
+
+def backtest(ticker_symbol, choose_year):
+    
+    present_date = datetime(choose_year, 12, 31, 23, 59, 59, 999999)
+    past_date = datetime(choose_year, 1, 1, 00, 00, 000000)
+
+    raw_stock_data = td_client.get_price_history(symbol = ticker_symbol, 
+                                          period_type = 'month',
+                                          frequency_type = 'daily',
+                                          frequency = 1, 
+                                          start_date = datetime_to_ms(past_date),
+                                          end_date = datetime_to_ms(present_date), 
+                                          extended_hours = True)
+    
+    df = pd.DataFrame(raw_stock_data['candles'])
+    df['date'] = [datetime.fromtimestamp(int(dates)/1000).strftime('%Y-%m-%d') for dates in df['datetime']]
+    df = df.set_index(pd.DatetimeIndex(df['date'])).drop(columns = ['datetime', 'date']).reset_index()
+    
+    n_trials = 5
+    # moving_average = run_MA_func(df, n_trials)
+    moving_average2 = run_MA_func2(df)
+    # bollinger_band = BB_parameters(df)
+    # keltner_channel = KC_parameters(df)
+    # bbkc_squeeze = squeeze_parameters(df)
+    # ttm_squeeze = ttm_squeeze_parameters(df)
+    # bollinger_band, keltner_channel, bbkc_squeeze, ttm_squeeze
+    return moving_average2
+print(backtest('NFLX', 2017))
+    
 
 
 KST_daily = [10,10,10,15,10,15,20,30,9]
